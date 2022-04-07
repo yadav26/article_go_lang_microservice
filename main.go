@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -37,6 +38,7 @@ type DtoResponseTagArticles struct {
 
 //Wrapper for the store
 type articleHandlers struct {
+	m     sync.Mutex
 	store []DtoRespArticle
 }
 
@@ -73,10 +75,10 @@ func (h *articleHandlers) tags(resp http.ResponseWriter, r *http.Request) {
 //curl http://localhost:3000/tags/health/20220407
 //
 func (h *articleHandlers) getTags(resp http.ResponseWriter, r *http.Request) {
-	ss := strings.Split(r.URL.String(), "/")
-	dateQ := ss[3]
-	tagQ := ss[2]
+	h.m.Lock()
+	defer h.m.Unlock()
 
+	ss := strings.Split(r.URL.String(), "/")
 	//Only allow valid request curl http://localhost:3000/tags/health/20220407
 	if len(ss) != 4 {
 		resp.WriteHeader(http.StatusBadRequest)
@@ -84,15 +86,17 @@ func (h *articleHandlers) getTags(resp http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	dateQ := ss[3]
+	tagQ := ss[2]
 	var tagStore DtoResponseTagArticles
 	tagMap := make(map[string]interface{})
 	count := 0
 	var ids []int
-//
-//Below code will search date and then iterate in tags to find query tag and date
-//combination
-//However GraphQL is expected to retrieve data faster and neat way
-//
+	//
+	//Below code will search date and then iterate in tags to find query tag and date
+	//combination
+	//However GraphQL is expected to retrieve data faster and neat way
+	//
 	for i := 0; i < len(h.store); i++ {
 		//clean search date string
 		res := strings.ReplaceAll(h.store[i].Date, "-", "")
@@ -109,6 +113,7 @@ func (h *articleHandlers) getTags(resp http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+
 	//create tag dto
 	tagStore.Count = count
 	tagStore.Tag = tagQ
@@ -135,8 +140,10 @@ func (h *articleHandlers) getTags(resp http.ResponseWriter, r *http.Request) {
 //curl http://localhost:3000/articles/0
 //
 func (h *articleHandlers) process_id_request(resp http.ResponseWriter, r *http.Request) {
-	ss := strings.Split(r.URL.String(), "/")
+	h.m.Lock()
+	defer h.m.Unlock()
 
+	ss := strings.Split(r.URL.String(), "/")
 	number, errConv := strconv.ParseUint(ss[2], 10, 32)
 	if errConv != nil {
 		resp.WriteHeader(http.StatusBadRequest)
@@ -168,8 +175,10 @@ func (h *articleHandlers) process_id_request(resp http.ResponseWriter, r *http.R
 //curl http://localhost:3000/articles
 //
 func (h *articleHandlers) get(resp http.ResponseWriter, r *http.Request) {
-	ss := strings.Split(r.URL.String(), "/")
+	h.m.Lock()
+	defer h.m.Unlock()
 
+	ss := strings.Split(r.URL.String(), "/")
 	if len(ss) > 3 {
 		resp.WriteHeader(http.StatusBadRequest)
 		resp.Write([]byte("Bad request url."))
@@ -196,10 +205,13 @@ func (h *articleHandlers) get(resp http.ResponseWriter, r *http.Request) {
 
 //
 //Post handler
-//respective post body is attached with postman query 
+//respective post body is attached with postman query
 //POST Domain object carries only Title,body and tags
 //
 func (h *articleHandlers) post(resp http.ResponseWriter, r *http.Request) {
+	h.m.Lock()
+	defer h.m.Unlock()
+
 	jsonBodyBytes, err := ioutil.ReadAll(r.Body)
 	defer r.Body.Close()
 	if err != nil {
@@ -222,7 +234,7 @@ func (h *articleHandlers) post(resp http.ResponseWriter, r *http.Request) {
 
 //
 //Domain data is converted to DTO before saving in repository
-//Adapter pattern to transform data from one form to other 
+//Adapter pattern to transform data from one form to other
 //
 func (h *articleHandlers) ConvertDomainToDto(domain DomainRequestArticle) DtoRespArticle {
 	var dto DtoRespArticle
