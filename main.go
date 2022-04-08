@@ -1,4 +1,5 @@
 package main
+
 import (
 	"encoding/json"
 	"fmt"
@@ -41,7 +42,7 @@ type DtoResponseTagArticles struct {
 }
 //Wrapper for the store
 type articleHandlers struct {
-	m     sync.Mutex
+	m     sync.Mutex 
 	ch	  chan DtoPostRequestArticle
 	store []DomainDataObject
 }
@@ -204,15 +205,33 @@ func (h *articleHandlers) get(resp http.ResponseWriter, r *http.Request) {
 
 //
 //This function expects to queue multiple clients post request to avoid 
-//write to block
+//delay in writer
 // 
 func (h *articleHandlers) enqueuPostRequests(resp http.ResponseWriter, r *http.Request) {
-
+	//Send it to channel
 	h.ch <- h.getDtoFromRequest(resp, r)
-
-	fmt.Println("enqueuPostRequests - ", len(h.ch))
+	//Return successful respone immediately
+	resp.Header().Add("Content-Type", "application/json")
+	resp.WriteHeader(http.StatusOK)
 }
 
+//
+//Below function will process all requests buffered in blocking channel
+//This is faster CQRS pattern to remove the write blocking 
+//Idea to remove locks but we still need it
+//
+func  processPostQueue(h *articleHandlers) {
+	for{
+		dtoReq, open := <- h.ch
+		if open == false{
+			return;
+		}
+		domain := h.ConvertReqDtoToDomain(dtoReq)
+		h.m.Lock()
+		h.store = append(h.store, domain)
+		h.m.Unlock()
+	}
+}
 //
 //Post handler
 //respective post body is attached with postman query
@@ -240,9 +259,7 @@ func (h *articleHandlers) getDtoFromRequest(resp http.ResponseWriter, r *http.Re
 	}
 
 	return dtoReq
-	//Adapter to translate request
-	//domain := h.ConvertReqDtoToDomain(dtoReq)
-	//h.store = append(h.store, domain)
+
 }
 //
 //Request DTO is converted to domain dto before saving in repository
@@ -286,9 +303,10 @@ func (h *articleHandlers) CreateRespStoreFromDomainStore() []DtoRespArticle {
 }
 
 //Get default store data
-func newArticleHandlers() *articleHandlers {
+func newArticleHandlers(postChannel chan DtoPostRequestArticle) *articleHandlers {
 	return &articleHandlers{
-		ch :make(chan DtoPostRequestArticle, 100), //Buffer 100 clients,
+		ch : postChannel,
+			//:make(chan DtoPostRequestArticle, 100), //Buffer 100 clients,
 		store: []DomainDataObject{
 			DomainDataObject{
 				Id:    0,
@@ -304,13 +322,27 @@ func newArticleHandlers() *articleHandlers {
 		},
 	}
 }
+
+
 func main() {
+
 	default_port := "3000"
+
+	//Scalable architecture - to cater 100 clients request simultaneously
+	max_clients := 100
+	ch := make(chan DtoPostRequestArticle, max_clients)
+
 	//Initializing default store
-	articleHandlers := newArticleHandlers()
+	articleHandlers := newArticleHandlers(ch)
+
 	//Router handler registration
 	http.HandleFunc("/", articleHandlers.articles)
 	http.HandleFunc("/tags/", articleHandlers.tags)
+
+	//Launch channel processing worker 
+	go processPostQueue(articleHandlers)
+	
+	//Launch server
 	fmt.Println("server running at  :" + default_port)
 	if err := http.ListenAndServe("localhost:"+default_port, nil); err != nil {
 		log.Fatal(err)
