@@ -6,17 +6,20 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
+
 //Domain object model for receiving Post request data
 type DtoPostRequestArticle struct {
 	Title string
 	Body  string
 	Tags  []string
 }
+
 //Data transfer object(DTO) model for responding to request for articles
 type DtoRespArticle struct {
 	Id    int
@@ -25,6 +28,7 @@ type DtoRespArticle struct {
 	Body  string
 	Tags  []string
 }
+
 //Data transfer object(DTO) model for responding to request for articles
 type DomainDataObject struct {
 	Id    int
@@ -33,6 +37,7 @@ type DomainDataObject struct {
 	Body  string
 	Tags  map[string]int
 }
+
 //Data transfer object(DTO) for responding to request for tag specific queries
 type DtoResponseTagArticles struct {
 	Tag          string   // Request tag
@@ -40,12 +45,27 @@ type DtoResponseTagArticles struct {
 	Articles     []int    // List of ids for the last 10 articles entered for that day
 	Related_Tags []string // Unique list of tags that are on the articles that the current tag is on for the same day
 }
+
+//Wrapper for the faster search algorithm support
+//Two maps formed by [date]:[]id
+//Two maps formed by [tag]:[]id
+//Then a common intersection of the map will be the result
+//
+type searchOptimizer struct {
+	//
+	DateIdsMap map[string][]int
+	TagIdsMap  map[string][]int
+}
+
 //Wrapper for the store
 type articleHandlers struct {
-	m     sync.Mutex 
-	ch	  chan DtoPostRequestArticle
+	m     sync.Mutex
+	ch    chan DtoPostRequestArticle
 	store []DomainDataObject
+	//enahnce search results
+	so searchOptimizer
 }
+
 //Request parser / router
 func (h *articleHandlers) articles(resp http.ResponseWriter, r *http.Request) {
 	switch r.Method {
@@ -60,11 +80,12 @@ func (h *articleHandlers) articles(resp http.ResponseWriter, r *http.Request) {
 		return
 	}
 }
+
 //Request parser / router
 func (h *articleHandlers) tags(resp http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "GET":
-		h.getTags(resp, r)
+		h.getTagsFaster(resp, r)
 		return
 	case "POST":
 	default:
@@ -74,10 +95,28 @@ func (h *articleHandlers) tags(resp http.ResponseWriter, r *http.Request) {
 }
 
 //
+//Intersection of two slices
+//
+func Intersection(a, b []int) (c []int) {
+	m := make(map[int]bool)
+
+	for _, item := range a {
+		m[item] = true
+	}
+
+	for _, item := range b {
+		if _, ok := m[item]; ok {
+			c = append(c, item)
+		}
+	}
+	return
+}
+
+//
 //GET - handler to process below curl requests
 //curl http://localhost:3000/tags/health/20220407
 //
-func (h *articleHandlers) getTags(resp http.ResponseWriter, r *http.Request) {
+func (h *articleHandlers) getTagsFaster(resp http.ResponseWriter, r *http.Request) {
 	h.m.Lock()
 	defer h.m.Unlock()
 	ss := strings.Split(r.URL.String(), "/")
@@ -87,41 +126,32 @@ func (h *articleHandlers) getTags(resp http.ResponseWriter, r *http.Request) {
 		resp.Write([]byte("Bad request tag url."))
 		return
 	}
+
 	dateQ := ss[3]
+	idsByDate := h.so.DateIdsMap[dateQ]
+
 	tagQ := ss[2]
+	idsByTag := h.so.TagIdsMap[tagQ]
+
+	finalIds := Intersection(idsByDate, idsByTag)
 	var tagStore DtoResponseTagArticles
+	tagStore.Tag = tagQ
+	tagStore.Count = len(finalIds)
+	tagStore.Articles = sort.IntSlice(finalIds)
+
 	tagMap := make(map[string]int)
-	count := 0
-	var ids []int
-	//
-	//Below code will search date and then iterate in tags to find query tag and date
-	//combination
-	//However GraphQL is expected to retrieve data faster and neat way
-	//
-	for i := 0; i < len(h.store); i++ {
-		//clean search date string
-		res := strings.ReplaceAll(h.store[i].Date, "-", "")
-		if res == dateQ { // date check
-			_,pres := h.store[i].Tags[tagQ] 
-			if pres == true {
-				//if we are here we have found a valid date and tag entry 
-				//Now create the return response dto object
-				ids = append(ids, h.store[i].Id )
-				for k,_ := range h.store[i].Tags{
-					tagMap[k] = 0
-				}
-				count++
-			}
+
+	for id := range finalIds {
+		for k, _ := range h.store[id].Tags {
+			tagMap[strings.ToLower(k)] = 0
 		}
 	}
 
-	//create tag dto
-	tagStore.Count = count
-	tagStore.Tag = tagQ
-	tagStore.Articles = ids
+	//map keys tags are flattened to slice for json dto
 	for k, _ := range tagMap {
 		tagStore.Related_Tags = append(tagStore.Related_Tags, k)
 	}
+
 	jsonBody, err := json.Marshal(tagStore)
 	if err != nil {
 		resp.WriteHeader(http.StatusInternalServerError)
@@ -132,7 +162,6 @@ func (h *articleHandlers) getTags(resp http.ResponseWriter, r *http.Request) {
 	resp.WriteHeader(http.StatusOK)
 	resp.Write(jsonBody)
 }
-
 
 //
 //GET - handler to process below curl requests
@@ -191,7 +220,7 @@ func (h *articleHandlers) get(resp http.ResponseWriter, r *http.Request) {
 	defer h.m.Unlock()
 
 	respStore := h.CreateRespStoreFromDomainStore()
-	
+
 	jsonBody, err := json.Marshal(respStore)
 	if err != nil {
 		resp.WriteHeader(http.StatusInternalServerError)
@@ -204,9 +233,9 @@ func (h *articleHandlers) get(resp http.ResponseWriter, r *http.Request) {
 }
 
 //
-//This function expects to queue multiple clients post request to avoid 
+//This function expects to queue multiple clients post request to avoid
 //delay in writer
-// 
+//
 func (h *articleHandlers) enqueuPostRequests(resp http.ResponseWriter, r *http.Request) {
 	//Send it to channel
 	h.ch <- h.getDtoFromRequest(resp, r)
@@ -217,21 +246,29 @@ func (h *articleHandlers) enqueuPostRequests(resp http.ResponseWriter, r *http.R
 
 //
 //Below function will process all requests buffered in blocking channel
-//This is faster CQRS pattern to remove the write blocking 
+//This is faster CQRS pattern to remove the write blocking
 //Idea to remove locks but we still need it
 //
-func  processPostQueue(h *articleHandlers) {
-	for{
-		dtoReq, open := <- h.ch
-		if open == false{
-			return;
+func processPostQueue(h *articleHandlers) {
+
+	for {
+		dtoReq, open := <-h.ch
+		if open == false {
+			return
 		}
 		domain := h.ConvertReqDtoToDomain(dtoReq)
 		h.m.Lock()
 		h.store = append(h.store, domain)
+		cleandate := strings.ReplaceAll(domain.Date, "-", "")
+		h.so.DateIdsMap[cleandate] = append(h.so.DateIdsMap[cleandate], domain.Id)
+		for k, _ := range domain.Tags {
+			h.so.TagIdsMap[strings.ToLower(k)] = append(h.so.TagIdsMap[k], domain.Id)
+		}
+
 		h.m.Unlock()
 	}
 }
+
 //
 //Post handler
 //respective post body is attached with postman query
@@ -239,28 +276,25 @@ func  processPostQueue(h *articleHandlers) {
 //Example - of curl post request
 //curl -H HOST "localhost:3000/articles" -X "POST" -d '{"Title":"Sugar","Body":"MyJson body is pretty form-at-ed","Tags":["health","fitness","science"]}'
 //
-func (h *articleHandlers) getDtoFromRequest(resp http.ResponseWriter, r *http.Request) DtoPostRequestArticle{
-	
+func (h *articleHandlers) getDtoFromRequest(resp http.ResponseWriter, r *http.Request) DtoPostRequestArticle {
+
 	var dtoReq DtoPostRequestArticle
 
 	jsonBodyBytes, err := ioutil.ReadAll(r.Body)
 	defer r.Body.Close()
 	if err != nil {
-		//resp.WriteHeader(http.StatusInternalServerError)
-		//resp.Write([]byte(err.Error()))
 		return dtoReq
 	}
-	
+
 	err = json.Unmarshal(jsonBodyBytes, &dtoReq)
 	if err != nil {
-		// resp.WriteHeader(http.StatusBadRequest)
-		// resp.Write([]byte(err.Error()))
 		return dtoReq
 	}
 
 	return dtoReq
 
 }
+
 //
 //Request DTO is converted to domain dto before saving in repository
 //Adapter pattern to transform data from one form to other
@@ -273,8 +307,8 @@ func (h *articleHandlers) ConvertReqDtoToDomain(dtoReq DtoPostRequestArticle) Do
 	domain.Body = dtoReq.Body
 	domain.Tags = make(map[string]int)
 	i := 0
-	for ;i<len(dtoReq.Tags); i++{
-		domain.Tags[dtoReq.Tags[i]] = i
+	for ; i < len(dtoReq.Tags); i++ {
+		domain.Tags[strings.ToLower(dtoReq.Tags[i])] = i
 	}
 	return domain
 }
@@ -284,9 +318,9 @@ func (h *articleHandlers) ConvertReqDtoToDomain(dtoReq DtoPostRequestArticle) Do
 //Adapter pattern to transform data from one form to other
 //
 func (h *articleHandlers) CreateRespStoreFromDomainStore() []DtoRespArticle {
-	
+
 	var s []DtoRespArticle
-	for i:=0; i< len(h.store); i++  {
+	for i := 0; i < len(h.store); i++ {
 		domain := h.store[i]
 		var dto DtoRespArticle
 		dto.Id = domain.Id
@@ -294,19 +328,27 @@ func (h *articleHandlers) CreateRespStoreFromDomainStore() []DtoRespArticle {
 		dto.Date = domain.Date
 		dto.Body = domain.Body
 		dto.Tags = make([]string, len(h.store[i].Tags))
-		for tag,_ := range h.store[i].Tags {
+		for tag, _ := range h.store[i].Tags {
 			dto.Tags = append(dto.Tags, tag)
 		}
 		s = append(s, dto)
-	} 
+	}
 	return s
 }
 
 //Get default store data
 func newArticleHandlers(postChannel chan DtoPostRequestArticle) *articleHandlers {
 	return &articleHandlers{
-		ch : postChannel,
-			//:make(chan DtoPostRequestArticle, 100), //Buffer 100 clients,
+		ch: postChannel,
+		so: searchOptimizer{
+			DateIdsMap: map[string][]int{
+				"": []int{},
+			},
+			TagIdsMap: map[string][]int{
+				"": []int{},
+			},
+		},
+		//:make(chan DtoPostRequestArticle, 100), //Buffer 100 clients,
 		store: []DomainDataObject{
 			DomainDataObject{
 				Id:    0,
@@ -314,15 +356,14 @@ func newArticleHandlers(postChannel chan DtoPostRequestArticle) *articleHandlers
 				Date:  time.Now().Format("2006-01-02"),
 				Body:  "some text, potentially containing simple markup about how potato chips are great",
 				Tags: map[string]int{
-					"health":0,
-					"fitness":1,
-					"science":2,
+					"health":  0,
+					"fitness": 1,
+					"science": 2,
 				},
 			},
 		},
 	}
 }
-
 
 func main() {
 
@@ -339,9 +380,9 @@ func main() {
 	http.HandleFunc("/", articleHandlers.articles)
 	http.HandleFunc("/tags/", articleHandlers.tags)
 
-	//Launch channel processing worker 
+	//Launch channel processing worker
 	go processPostQueue(articleHandlers)
-	
+
 	//Launch server
 	fmt.Println("server running at  :" + default_port)
 	if err := http.ListenAndServe("localhost:"+default_port, nil); err != nil {
