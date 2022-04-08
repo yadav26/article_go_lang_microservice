@@ -42,6 +42,7 @@ type DtoResponseTagArticles struct {
 //Wrapper for the store
 type articleHandlers struct {
 	m     sync.Mutex
+	ch	  chan DtoPostRequestArticle
 	store []DomainDataObject
 }
 //Request parser / router
@@ -51,7 +52,7 @@ func (h *articleHandlers) articles(resp http.ResponseWriter, r *http.Request) {
 		h.get(resp, r)
 		return
 	case "POST":
-		h.post(resp, r)
+		h.enqueuPostRequests(resp, r)
 		return
 	default:
 		resp.WriteHeader(http.StatusMethodNotAllowed)
@@ -169,6 +170,7 @@ func (h *articleHandlers) process_id_request(resp http.ResponseWriter, r *http.R
 //GET - handler to process below curl requests
 //curl http://localhost:3000/
 //curl http://localhost:3000/articles
+//curl http://localhost:3000/articles/0
 //
 func (h *articleHandlers) get(resp http.ResponseWriter, r *http.Request) {
 
@@ -189,8 +191,6 @@ func (h *articleHandlers) get(resp http.ResponseWriter, r *http.Request) {
 
 	respStore := h.CreateRespStoreFromDomainStore()
 	
-	fmt.Println(respStore)
-
 	jsonBody, err := json.Marshal(respStore)
 	if err != nil {
 		resp.WriteHeader(http.StatusInternalServerError)
@@ -208,6 +208,9 @@ func (h *articleHandlers) get(resp http.ResponseWriter, r *http.Request) {
 // 
 func (h *articleHandlers) enqueuPostRequests(resp http.ResponseWriter, r *http.Request) {
 
+	h.ch <- h.getDtoFromRequest(resp, r)
+
+	fmt.Println("enqueuPostRequests - ", len(h.ch))
 }
 
 //
@@ -217,27 +220,29 @@ func (h *articleHandlers) enqueuPostRequests(resp http.ResponseWriter, r *http.R
 //Example - of curl post request
 //curl -H HOST "localhost:3000/articles" -X "POST" -d '{"Title":"Sugar","Body":"MyJson body is pretty form-at-ed","Tags":["health","fitness","science"]}'
 //
-func (h *articleHandlers) post(resp http.ResponseWriter, r *http.Request) {
-	h.m.Lock()
-	defer h.m.Unlock()
+func (h *articleHandlers) getDtoFromRequest(resp http.ResponseWriter, r *http.Request) DtoPostRequestArticle{
+	
+	var dtoReq DtoPostRequestArticle
+
 	jsonBodyBytes, err := ioutil.ReadAll(r.Body)
 	defer r.Body.Close()
 	if err != nil {
-		resp.WriteHeader(http.StatusInternalServerError)
-		resp.Write([]byte(err.Error()))
-		return
+		//resp.WriteHeader(http.StatusInternalServerError)
+		//resp.Write([]byte(err.Error()))
+		return dtoReq
 	}
-	var dtoReq DtoPostRequestArticle
+	
 	err = json.Unmarshal(jsonBodyBytes, &dtoReq)
 	if err != nil {
-		resp.WriteHeader(http.StatusBadRequest)
-		resp.Write([]byte(err.Error()))
-		return
+		// resp.WriteHeader(http.StatusBadRequest)
+		// resp.Write([]byte(err.Error()))
+		return dtoReq
 	}
 
+	return dtoReq
 	//Adapter to translate request
-	domain := h.ConvertReqDtoToDomain(dtoReq)
-	h.store = append(h.store, domain)
+	//domain := h.ConvertReqDtoToDomain(dtoReq)
+	//h.store = append(h.store, domain)
 }
 //
 //Request DTO is converted to domain dto before saving in repository
@@ -283,6 +288,7 @@ func (h *articleHandlers) CreateRespStoreFromDomainStore() []DtoRespArticle {
 //Get default store data
 func newArticleHandlers() *articleHandlers {
 	return &articleHandlers{
+		ch :make(chan DtoPostRequestArticle, 100), //Buffer 100 clients,
 		store: []DomainDataObject{
 			DomainDataObject{
 				Id:    0,
