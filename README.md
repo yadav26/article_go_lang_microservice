@@ -7,3 +7,6 @@ To run software
 >>go run main.go 
 
 To test you need Postman, import the postman json and run get/post
+
+
+https://ffxblue.github.io/interview-tests/test/article-api/
